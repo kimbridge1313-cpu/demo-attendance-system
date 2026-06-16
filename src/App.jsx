@@ -1,21 +1,298 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { initializeApp } from "firebase/app";
-import {
-  getFirestore,
-  collection,
-  doc,
-  getDoc,
-  setDoc,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  query,
-  where,
-  limit,
-  getDocs,
-  serverTimestamp,
-} from "firebase/firestore";
-import liff from "@line/liff";
+
+
+// Demo runtime: no Firebase, no LIFF. All reads/writes below use this in-memory store.
+const DEMO_NO_FIREBASE = true;
+let demoIdSeq = 1000;
+const demoDatabase = {
+  employees: {},
+  attendanceRecords: {},
+  schedules: {},
+  correctionRequests: {},
+  settings: {},
+  shiftTemplates: {},
+  payrollAdjustments: {},
+};
+
+const liff = {
+  init: async () => {},
+  isLoggedIn: () => true,
+  login: () => {},
+  getProfile: async () => DEV_PROFILE,
+};
+
+const initializeApp = () => ({ demo: true });
+const getFirestore = () => ({ demo: true });
+const collection = (_db, name) => ({ type: "collection", name });
+const doc = (_db, collectionName, id) => ({ type: "doc", collectionName, id });
+const where = (field, op, value) => ({ type: "where", field, op, value });
+const limit = (count) => ({ type: "limit", count });
+const query = (source, ...constraints) => ({ type: "query", source, constraints });
+const serverTimestamp = () => ({
+  seconds: Math.floor(Date.now() / 1000),
+  toMillis: () => Date.now(),
+});
+
+function cloneDemoData(value) {
+  if (value === null || value === undefined) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getCollectionNameFromRef(ref) {
+  if (!ref) return "";
+  if (ref.type === "collection") return ref.name;
+  if (ref.type === "doc") return ref.collectionName;
+  if (ref.type === "query") return getCollectionNameFromRef(ref.source);
+  return "";
+}
+
+function makeDemoSnap(collectionName, docsArray) {
+  return {
+    docs: docsArray.map((item) => ({
+      id: item.id,
+      data: () => cloneDemoData(item),
+    })),
+  };
+}
+
+function makeDemoDocSnap(collectionName, id) {
+  const item = demoDatabase[collectionName]?.[id];
+  return {
+    exists: () => Boolean(item),
+    id,
+    data: () => cloneDemoData(item),
+  };
+}
+
+async function getDoc(ref) {
+  return makeDemoDocSnap(ref.collectionName, ref.id);
+}
+
+async function setDoc(ref, data, options = {}) {
+  const collectionName = ref.collectionName;
+  if (!demoDatabase[collectionName]) demoDatabase[collectionName] = {};
+  const current = demoDatabase[collectionName][ref.id] || {};
+  demoDatabase[collectionName][ref.id] = cloneDemoData(options?.merge ? { ...current, ...data, id: ref.id } : { ...data, id: ref.id });
+  return null;
+}
+
+async function addDoc(collectionRef, data) {
+  const collectionName = collectionRef.name;
+  if (!demoDatabase[collectionName]) demoDatabase[collectionName] = {};
+  const id = `demo_${demoIdSeq++}`;
+  demoDatabase[collectionName][id] = cloneDemoData({ ...data, id });
+  return { id };
+}
+
+async function updateDoc(ref, patch) {
+  const collectionName = ref.collectionName;
+  if (!demoDatabase[collectionName]) demoDatabase[collectionName] = {};
+  const current = demoDatabase[collectionName][ref.id] || { id: ref.id };
+  demoDatabase[collectionName][ref.id] = cloneDemoData({ ...current, ...patch, id: ref.id });
+  return null;
+}
+
+async function deleteDoc(ref) {
+  const collectionName = ref.collectionName;
+  if (demoDatabase[collectionName]) delete demoDatabase[collectionName][ref.id];
+  return null;
+}
+
+function matchesDemoWhere(item, condition) {
+  if (!condition || condition.type !== "where") return true;
+  const actual = item?.[condition.field];
+  if (condition.op === "==") return actual === condition.value;
+  if (condition.op === ">=") return String(actual || "") >= String(condition.value || "");
+  if (condition.op === "<=") return String(actual || "") <= String(condition.value || "");
+  return true;
+}
+
+async function getDocs(ref) {
+  const collectionName = getCollectionNameFromRef(ref);
+  const rows = Object.values(demoDatabase[collectionName] || {});
+  const constraints = ref?.type === "query" ? ref.constraints || [] : [];
+  let filtered = rows.filter((item) => constraints.filter((c) => c.type === "where").every((condition) => matchesDemoWhere(item, condition)));
+  const limitConstraint = constraints.find((c) => c.type === "limit");
+  if (limitConstraint) filtered = filtered.slice(0, limitConstraint.count);
+  return makeDemoSnap(collectionName, filtered);
+}
+
+function seedDemoDatabase() {
+  const now = serverTimestamp();
+  demoDatabase.employees = {
+    DEMO_OWNER_USER_ID: {
+      id: "DEMO_OWNER_USER_ID",
+      lineUserId: "DEMO_OWNER_USER_ID",
+      name: "Demo 管理者",
+      displayName: "Demo 管理者",
+      pictureUrl: "",
+      role: "owner",
+      status: "active",
+      employeeType: "hourly",
+      department: "A店",
+      departments: ["A店", "B店"],
+      hourlyWage: 0,
+      baseSalary: 0,
+      overtimeHourlyWage: 0,
+      phone: "",
+      note: "作品集展示用帳號，不讀取正式資料。",
+      createdAt: now,
+      updatedAt: now,
+    },
+    DEMO_EMP_001: {
+      id: "DEMO_EMP_001",
+      lineUserId: "DEMO_EMP_001",
+      name: "陳小安",
+      displayName: "陳小安",
+      pictureUrl: "",
+      role: "employee",
+      status: "active",
+      employeeType: "hourly",
+      department: "A店",
+      departments: ["A店"],
+      hourlyWage: 190,
+      baseSalary: 0,
+      overtimeHourlyWage: 190,
+      phone: "0912-000-001",
+      note: "Demo 員工",
+      createdAt: now,
+      updatedAt: now,
+    },
+    DEMO_EMP_002: {
+      id: "DEMO_EMP_002",
+      lineUserId: "DEMO_EMP_002",
+      name: "林柏宇",
+      displayName: "林柏宇",
+      pictureUrl: "",
+      role: "employee",
+      status: "active",
+      employeeType: "fullTime",
+      department: "B店",
+      departments: ["B店"],
+      hourlyWage: 0,
+      baseSalary: 32000,
+      overtimeHourlyWage: 200,
+      phone: "0912-000-002",
+      note: "Demo 正職",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  const today = todayString();
+  const month = getMonthString();
+  demoDatabase.attendanceRecords = {
+    rec_demo_001: {
+      id: "rec_demo_001",
+      employeeId: "DEMO_EMP_001",
+      employeeName: "陳小安",
+      department: "A店",
+      date: today,
+      month,
+      clockIn: "09:02",
+      clockOut: "18:00",
+      workMinutes: 538,
+      workHours: formatHours(538),
+      attendanceStatus: "normal",
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      source: "demo",
+      status: "completed",
+      createdAt: now,
+      updatedAt: now,
+    },
+    rec_demo_002: {
+      id: "rec_demo_002",
+      employeeId: "DEMO_EMP_002",
+      employeeName: "林柏宇",
+      department: "B店",
+      date: today,
+      month,
+      clockIn: "10:15",
+      clockOut: "19:00",
+      workMinutes: 525,
+      workHours: formatHours(525),
+      attendanceStatus: "late",
+      lateMinutes: 15,
+      earlyLeaveMinutes: 0,
+      source: "demo",
+      status: "completed",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  demoDatabase.schedules = {
+    sch_demo_001: {
+      id: "sch_demo_001",
+      employeeId: "DEMO_EMP_001",
+      employeeName: "陳小安",
+      department: "A店",
+      date: today,
+      month,
+      shiftId: "shift_demo_001",
+      shiftName: "A店早班",
+      startTime: "09:00",
+      endTime: "18:00",
+      scheduledMinutes: 540,
+      graceMinutes: DEFAULT_GRACE_MINUTES,
+      status: "scheduled",
+      createdAt: now,
+      updatedAt: now,
+    },
+    sch_demo_002: {
+      id: "sch_demo_002",
+      employeeId: "DEMO_EMP_002",
+      employeeName: "林柏宇",
+      department: "B店",
+      date: today,
+      month,
+      shiftId: "shift_demo_002",
+      shiftName: "B店晚班",
+      startTime: "10:00",
+      endTime: "19:00",
+      scheduledMinutes: 540,
+      graceMinutes: DEFAULT_GRACE_MINUTES,
+      status: "scheduled",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  demoDatabase.correctionRequests = {
+    corr_demo_001: {
+      id: "corr_demo_001",
+      employeeId: "DEMO_EMP_001",
+      employeeName: "陳小安",
+      department: "A店",
+      type: "clockIn",
+      date: today,
+      time: "09:00",
+      reason: "忘記打上班卡",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  demoDatabase.settings = {
+    companyLocations: {
+      id: "companyLocations",
+      locations: DEFAULT_COMPANY_LOCATIONS,
+      updatedAt: now,
+    },
+  };
+
+  demoDatabase.shiftTemplates = {
+    shift_demo_001: { id: "shift_demo_001", name: "A店早班", department: "A店", startTime: "09:00", endTime: "18:00", graceMinutes: DEFAULT_GRACE_MINUTES, scheduledMinutes: 540, createdAt: now, updatedAt: now },
+    shift_demo_002: { id: "shift_demo_002", name: "B店晚班", department: "B店", startTime: "10:00", endTime: "19:00", graceMinutes: DEFAULT_GRACE_MINUTES, scheduledMinutes: 540, createdAt: now, updatedAt: now },
+    shift_demo_rest: { id: "shift_demo_rest", name: "休息", department: "休息", isRest: true, isFlexible: false, startTime: "", endTime: "", scheduledMinutes: 0, graceMinutes: 0, createdAt: now, updatedAt: now },
+  };
+
+  demoDatabase.payrollAdjustments = {
+    adj_demo_001: { id: "adj_demo_001", employeeId: "DEMO_EMP_001", employeeName: "陳小安", month, type: "addition", title: "Demo 獎金", amount: 500, note: "作品集展示資料", createdAt: now, updatedAt: now },
+  };
+}
 
 /**
  * Attendance LIFF + Firebase Firestore Frontend
@@ -35,19 +312,12 @@ import liff from "@line/liff";
 // 開發測試保持 true；正式接 LINE LIFF 時改 false。
 const DEV_MODE = true;
 const DEV_LOGIN_AS = "owner"; // DEV_MODE=true 時才會使用：owner / newEmployee / employee
-const LIFF_ID = "2009896295-aplNwbiH";
-const OWNER_LINE_USER_IDS = ["U0d01ce43203dbcf0d3a94436b60eb232"];
+const LIFF_ID = "";
+const OWNER_LINE_USER_IDS = ["DEMO_OWNER_USER_ID"];
 const APP_BASE_URL = typeof window !== "undefined" ? window.location.origin : "";
 // ======================================
 
-const firebaseConfig = {
-  apiKey: "AIzaSyAbfvJlElGLgI1lX7fsdEeV3VS8Gk0o3YA",
-  authDomain: "attendance-app-c95ff.firebaseapp.com",
-  projectId: "attendance-app-c95ff",
-  storageBucket: "attendance-app-c95ff.firebasestorage.app",
-  messagingSenderId: "1069052716411",
-  appId: "1069052716411:web:83129a080b3bd62bbdc9de",
-};
+const firebaseConfig = {};
 
 const DEPARTMENTS = ["A店", "B店"];
 const DEFAULT_GRACE_MINUTES = 10;
@@ -67,14 +337,15 @@ const DEFAULT_COMPANY_LOCATIONS = [
 ];
 
 const DEV_PROFILES = {
-  owner: { userId: OWNER_LINE_USER_IDS[0] || "DEV_OWNER_USER_ID", displayName: "開發測試老闆", pictureUrl: "" },
-  newEmployee: { userId: "DEV_NEW_EMPLOYEE_USER_ID", displayName: "新員工測試帳號", pictureUrl: "" },
-  employee: { userId: "DEV_EMPLOYEE_USER_ID", displayName: "已審核員工測試帳號", pictureUrl: "" },
+  owner: { userId: OWNER_LINE_USER_IDS[0] || "DEMO_OWNER_USER_ID", displayName: "Demo 管理者", pictureUrl: "" },
+  newEmployee: { userId: "DEMO_NEW_EMPLOYEE_USER_ID", displayName: "新員工測試帳號", pictureUrl: "" },
+  employee: { userId: "DEMO_EMP_001", displayName: "陳小安", pictureUrl: "" },
 };
 const DEV_PROFILE = DEV_PROFILES[DEV_LOGIN_AS] || DEV_PROFILES.owner;
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+seedDemoDatabase();
 
 const todayString = () => {
   const now = new Date();
@@ -419,8 +690,8 @@ function runSelfTests() {
 }
 runSelfTests();
 
-const isFirebaseConfigReady = () => Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && !firebaseConfig.apiKey.includes("請貼上"));
-const isLiffReady = () => Boolean(LIFF_ID && !LIFF_ID.includes("請貼上"));
+const isFirebaseConfigReady = () => true;
+const isLiffReady = () => true;
 
 function App() {
   const [loading, setLoading] = useState(true);
@@ -479,32 +750,6 @@ function App() {
 
     if (!lineProfile) { setLoading(false); return; }
     setProfile(lineProfile);
-
-    if (DEV_MODE) {
-      setCompanyLocations(DEFAULT_COMPANY_LOCATIONS);
-      setEmployee({
-        id: lineProfile.userId,
-        lineUserId: lineProfile.userId,
-        name: "Demo 管理者",
-        displayName: "Demo 管理者",
-        pictureUrl: "",
-        role: "owner",
-        status: "active",
-        employeeType: "hourly",
-        department: "A店",
-        departments: ["A店", "B店"],
-        hourlyWage: 0,
-        baseSalary: 0,
-        overtimeHourlyWage: 0,
-        phone: "",
-        note: "作品集展示用帳號，不讀取正式員工資料。",
-      });
-      setTodayRecords([]);
-      setTodaySchedules([]);
-      setLoading(false);
-      return;
-    }
-
     await loadCompanyLocations();
 
     const employeeRef = doc(db, "employees", lineProfile.userId);
@@ -660,18 +905,6 @@ function App() {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
-      if (DEV_MODE) {
-        const demoId = `demo-${Date.now()}`;
-        setTodayRecords((prev) => [{ id: demoId, ...data }, ...prev]);
-        setSuccessPopup({
-          title: "上班打卡成功",
-          time,
-          department,
-          subtitle: selectedSchedule ? `${selectedSchedule.startTime}-${selectedSchedule.endTime}` : "無排班打卡",
-        });
-        return;
-      }
-
       const ref = await safeRun(() => addDoc(collection(db, "attendanceRecords"), data), "上班打卡失敗。", setError);
       if (ref) {
         setTodayRecords((prev) => [{ id: ref.id, ...data }, ...prev]);
@@ -721,17 +954,6 @@ function App() {
         clockOutLongitude: longitude,
         updatedAt: serverTimestamp(),
       };
-      if (DEV_MODE) {
-        setTodayRecords((prev) => prev.map((item) => item.id === record.id ? { ...item, ...updateData } : item));
-        setSuccessPopup({
-          title: "下班打卡成功",
-          time,
-          department: record.department || matchedLocation.name,
-          subtitle: `今日工時 ${formatHours(workMinutes)} 小時`,
-        });
-        return;
-      }
-
       const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updateData), "下班打卡失敗。", setError);
       if (ok !== null) {
         setTodayRecords((prev) => prev.map((item) => item.id === record.id ? { ...item, ...updateData } : item));
@@ -749,7 +971,7 @@ function App() {
     }
   }
 
-  if (loading) return DEV_MODE ? null : <SplashScreen />;
+  if (loading) return <SplashScreen />;
   if (!profile) return <ErrorPage message={error || "尚未取得 LINE / DEV 身分。"} onRetry={boot} />;
   if (!employee) return <JoinPage profile={profile} onSubmit={applyJoin} error={error} />;
   if (employee.status === "pending") return <FullPage message="你的加入申請已送出，請等待主管審核。" />;
@@ -761,7 +983,7 @@ function App() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
           <div>
             <h1 className="text-lg font-bold">員工打卡系統</h1>
-            <p className="text-xs text-neutral-500">Firebase Firestore 版{DEV_MODE ? `｜開發測試模式：${DEV_LOGIN_AS}` : ""}</p>
+            <p className="text-xs text-neutral-500">作品集 Demo｜前端本地資料，不連 Firebase / LIFF{DEV_MODE ? `｜開發測試模式：${DEV_LOGIN_AS}` : ""}</p>
           </div>
           <div className="text-right text-sm">
             <div className="font-medium">{employee.name}</div>
@@ -772,7 +994,7 @@ function App() {
 
       <main className="mx-auto max-w-6xl px-4 py-5">
         {error && <div className="mb-4 whitespace-pre-line rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
-        {DEV_MODE && <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">目前是 DEV_MODE，身份：<b>{DEV_LOGIN_AS}</b>。定位失敗時會使用公司預設位置作為測試 fallback。</div>}
+        {DEV_MODE && <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">目前是作品集 Demo，本頁所有資料只存在瀏覽器記憶體，不會讀取或寫入 Firebase。</div>}
         <nav className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-6">
           <TabButton active={activeTab === "clock"} onClick={() => setActiveTab("clock")}>打卡</TabButton>
           <TabButton active={activeTab === "correction"} onClick={() => setActiveTab("correction")}>補卡</TabButton>
